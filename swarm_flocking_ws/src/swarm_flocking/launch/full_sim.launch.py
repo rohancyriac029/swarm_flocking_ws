@@ -95,16 +95,24 @@ def _spawn_all(context, *args, **kwargs):
     from launch_ros.actions import Node as RosNode
     from launch.actions import TimerAction
 
-    # Resolve TB3 path here (inside OpaqueFunction) so a missing package
-    # produces a clear error at launch-time, not at file-parse time.
+    # Resolve package paths.  The SDF model (from turtlebot3_gazebo) contains
+    # Gazebo plugins (diff_drive, lidar, IMU), while the URDF (from
+    # turtlebot3_description) is plugin-free and used only for TF.
     try:
         pkg_tb3_desc = get_package_share_directory('turtlebot3_description')
     except Exception:
         raise RuntimeError(
             "Could not find 'turtlebot3_description'. "
             "Install it with:\n"
-            "  sudo apt install ros-humble-turtlebot3 ros-humble-turtlebot3-description\n"
-            "Then re-source your workspace."
+            "  sudo apt install ros-humble-turtlebot3-description\n"
+        )
+    try:
+        pkg_tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
+    except Exception:
+        raise RuntimeError(
+            "Could not find 'turtlebot3_gazebo'. "
+            "Install it with:\n"
+            "  sudo apt install ros-humble-turtlebot3-gazebo\n"
         )
 
     pkg_flocking = get_package_share_directory('swarm_flocking')
@@ -114,8 +122,13 @@ def _spawn_all(context, *args, **kwargs):
     use_sim_time = context.launch_configurations.get('use_sim_time', 'true')
     tb3_model    = context.launch_configurations.get('turtlebot3_model', 'burger')
 
+    # URDF for robot_state_publisher (TF frames, no Gazebo plugins)
     urdf_path = os.path.join(
         pkg_tb3_desc, 'urdf', f'turtlebot3_{tb3_model}.urdf')
+
+    # SDF model for Gazebo (HAS plugins: diff_drive, lidar, IMU)
+    sdf_path = os.path.join(
+        pkg_tb3_gazebo, 'models', f'turtlebot3_{tb3_model}', 'model.sdf')
 
     # Grid spawn: 3 columns
     start_x, start_y = 2.0, 4.5
@@ -130,19 +143,13 @@ def _spawn_all(context, *args, **kwargs):
         ns = f'robot_{i}'
 
         # --- Timing constants ---
-        # GAZEBO_READY_DELAY: seconds to wait for Gazebo's /spawn_entity
-        # service to become available. Gazebo + GazeboRosFactory
-        # typically takes 8-12s depending on hardware.
         GAZEBO_READY_DELAY = 30.0
-        # Stagger each robot by 1.5s so spawn calls don't collide.
         spawn_time = GAZEBO_READY_DELAY + i * 1.5
-        # Boid nodes start 5s after their robot is spawned.
         boid_time  = spawn_time + 5.0
 
-        # robot_state_publisher: start early so /robot_description is
-        # ready when spawn_entity.py subscribes to it.
+        # robot_state_publisher for TF (uses URDF — no Gazebo plugins needed)
         rsp_action = TimerAction(
-            period=float(GAZEBO_READY_DELAY - 2.0),   # 2s before spawn
+            period=float(GAZEBO_READY_DELAY - 2.0),
             actions=[
                 RosNode(
                     package='robot_state_publisher',
@@ -159,7 +166,7 @@ def _spawn_all(context, *args, **kwargs):
             ],
         )
 
-        # Spawn entity: fires after Gazebo is ready
+        # Spawn entity from SDF (HAS Gazebo plugins for odom/scan/cmd_vel)
         spawn_action = TimerAction(
             period=float(spawn_time),
             actions=[
@@ -168,7 +175,7 @@ def _spawn_all(context, *args, **kwargs):
                     executable='spawn_entity.py',
                     arguments=[
                         '-entity', ns,
-                        '-topic', f'/{ns}/robot_description',
+                        '-file', sdf_path,
                         '-x', str(x),
                         '-y', str(y),
                         '-z', '0.01',
@@ -225,38 +232,14 @@ def _spawn_all(context, *args, **kwargs):
 
 
 def _read_urdf(urdf_path: str) -> str:
-    """Process URDF via xacro to expand macros and include Gazebo plugins.
-
-    TurtleBot3's URDF uses xacro includes for Gazebo plugins (diff_drive,
-    lidar, IMU).  Reading the raw file skips these, leaving the spawned
-    robot with NO ROS topics (no odom, no scan, no cmd_vel subscriber).
-    """
-    import subprocess
-
-    # Try the .xacro variant first (TurtleBot3 convention)
-    xacro_path = urdf_path
-    if not os.path.exists(xacro_path):
-        # Try with .xacro extension
-        xacro_path = urdf_path + '.xacro'
-    if not os.path.exists(xacro_path):
-        # Try replacing .urdf with .urdf.xacro
-        xacro_path = urdf_path.replace('.urdf', '.urdf.xacro')
-
+    """Read URDF for robot_state_publisher (TF frames only, no plugins)."""
     try:
-        result = subprocess.run(
-            ['xacro', xacro_path],
-            capture_output=True, text=True, check=True,
+        with open(urdf_path, 'r') as f:
+            return f.read()
+    except FileNotFoundError:
+        return (
+            '<?xml version="1.0"?>'
+            '<robot name="turtlebot3_burger">'
+            '<link name="base_link"/>'
+            '</robot>'
         )
-        return result.stdout
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        # Fallback: try reading the raw file
-        try:
-            with open(urdf_path, 'r') as f:
-                return f.read()
-        except FileNotFoundError:
-            return (
-                '<?xml version="1.0"?>'
-                '<robot name="turtlebot3_burger">'
-                '<link name="base_link"/>'
-                '</robot>'
-            )

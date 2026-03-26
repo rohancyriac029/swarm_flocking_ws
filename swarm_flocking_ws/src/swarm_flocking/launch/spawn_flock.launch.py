@@ -46,38 +46,28 @@ def generate_launch_description():
 def _do_spawn(context, *args, **kwargs):
     pkg_flocking = get_package_share_directory('swarm_flocking')
     pkg_tb3_desc = get_package_share_directory('turtlebot3_description')
+    pkg_tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
     params_file  = os.path.join(pkg_flocking, 'config', 'flocking_params.yaml')
 
     num_robots   = int(context.launch_configurations.get('num_robots', '6'))
     use_sim_time = context.launch_configurations.get('use_sim_time', 'true')
     tb3_model    = context.launch_configurations.get('turtlebot3_model', 'burger')
 
+    # URDF for robot_state_publisher (TF only, no Gazebo plugins)
     urdf_path = os.path.join(
         pkg_tb3_desc, 'urdf', f'turtlebot3_{tb3_model}.urdf')
-
-    # Process URDF via xacro to include Gazebo plugins (diff_drive, lidar)
-    import subprocess
-    xacro_path = urdf_path
-    if not os.path.exists(xacro_path):
-        xacro_path = urdf_path + '.xacro'
-    if not os.path.exists(xacro_path):
-        xacro_path = urdf_path.replace('.urdf', '.urdf.xacro')
-
     try:
-        result = subprocess.run(
-            ['xacro', xacro_path],
-            capture_output=True, text=True, check=True,
+        with open(urdf_path, 'r') as f:
+            robot_description = f.read()
+    except FileNotFoundError:
+        robot_description = (
+            '<?xml version="1.0"?>'
+            '<robot name="turtlebot3_burger"><link name="base_link"/></robot>'
         )
-        robot_description = result.stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        try:
-            with open(urdf_path, 'r') as f:
-                robot_description = f.read()
-        except FileNotFoundError:
-            robot_description = (
-                '<?xml version="1.0"?>'
-                '<robot name="turtlebot3_burger"><link name="base_link"/></robot>'
-            )
+
+    # SDF model (HAS Gazebo plugins: diff_drive, lidar, IMU)
+    sdf_path = os.path.join(
+        pkg_tb3_gazebo, 'models', f'turtlebot3_{tb3_model}', 'model.sdf')
 
     # Grid layout: 3 columns, starting at (2.0, 4.5)
     start_x, start_y, spacing = 2.0, 4.5, 0.7
@@ -90,14 +80,11 @@ def _do_spawn(context, *args, **kwargs):
         y = start_y + row * spacing
         ns = f'robot_{i}'
 
-        # Timing: Gazebo (already running) still needs a moment to serve
-        # /spawn_entity. Stagger each robot to avoid simultaneous spawn calls.
-        # Tune GAZEBO_READY_DELAY down to 3s if Gazebo was already running.
         GAZEBO_READY_DELAY = 30.0
         spawn_time = GAZEBO_READY_DELAY + i * 1.5
         boid_time  = spawn_time + 5.0
 
-        # robot_state_publisher — start before spawn so topic is ready
+        # robot_state_publisher — TF frames (URDF, no plugins)
         rsp_action = TimerAction(
             period=max(0.5, float(GAZEBO_READY_DELAY - 1.5)),
             actions=[
@@ -116,7 +103,7 @@ def _do_spawn(context, *args, **kwargs):
             ],
         )
 
-        # Spawn: fires after /spawn_entity is available
+        # Spawn from SDF (HAS Gazebo plugins for odom/scan/cmd_vel)
         spawn_action = TimerAction(
             period=float(spawn_time),
             actions=[
@@ -125,7 +112,7 @@ def _do_spawn(context, *args, **kwargs):
                     executable='spawn_entity.py',
                     arguments=[
                         '-entity', ns,
-                        '-topic', f'/{ns}/robot_description',
+                        '-file', sdf_path,
                         '-x', str(x),
                         '-y', str(y),
                         '-z', '0.01',
