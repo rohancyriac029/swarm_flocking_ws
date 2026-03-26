@@ -66,20 +66,8 @@ def generate_launch_description():
             os.path.join(pkg_gazebo, 'launch', 'gazebo_world.launch.py')),
         launch_arguments={'world': world_file}.items())
 
-    # Spawn robots + boid nodes via OpaqueFunction
+    # Spawn robots + boid nodes + flock_monitor via OpaqueFunction
     spawn_and_boids = OpaqueFunction(function=_spawn_all)
-
-    # Flock monitor (singleton)
-    monitor_node = Node(
-        package='swarm_flocking',
-        executable='flock_monitor_node',
-        name='flock_monitor',
-        parameters=[
-            params_file,
-            {'use_sim_time': LaunchConfiguration('use_sim_time')},
-        ],
-        output='screen',
-    )
 
     # RViz
     rviz_node = Node(
@@ -98,7 +86,6 @@ def generate_launch_description():
         tb3_model_arg,
         gazebo_launch,
         spawn_and_boids,
-        monitor_node,
         rviz_node,
     ])
 
