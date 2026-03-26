@@ -146,7 +146,7 @@ def _spawn_all(context, *args, **kwargs):
         # GAZEBO_READY_DELAY: seconds to wait for Gazebo's /spawn_entity
         # service to become available. Gazebo + GazeboRosFactory
         # typically takes 8-12s depending on hardware.
-        GAZEBO_READY_DELAY = 10.0
+        GAZEBO_READY_DELAY = 30.0
         # Stagger each robot by 1.5s so spawn calls don't collide.
         spawn_time = GAZEBO_READY_DELAY + i * 1.5
         # Boid nodes start 5s after their robot is spawned.

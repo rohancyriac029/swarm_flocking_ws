@@ -79,7 +79,7 @@ def _do_spawn(context, *args, **kwargs):
         # Timing: Gazebo (already running) still needs a moment to serve
         # /spawn_entity. Stagger each robot to avoid simultaneous spawn calls.
         # Tune GAZEBO_READY_DELAY down to 3s if Gazebo was already running.
-        GAZEBO_READY_DELAY = 3.0
+        GAZEBO_READY_DELAY = 30.0
         spawn_time = GAZEBO_READY_DELAY + i * 1.5
         boid_time  = spawn_time + 5.0
 
