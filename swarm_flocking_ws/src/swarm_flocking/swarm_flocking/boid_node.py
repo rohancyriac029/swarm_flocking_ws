@@ -159,7 +159,7 @@ class BoidNode(Node):
         self.collision_count: int = 0
 
         # ----------------------------------------------------------------
-        # Publishers
+        # Publishers — use absolute topic paths with robot namespace
         # ----------------------------------------------------------------
         ns = f'/robot_{self.robot_id}'
 
@@ -173,7 +173,7 @@ class BoidNode(Node):
             TwistStamped, f'{ns}/velocity_share', STATE_QOS)
 
         # ----------------------------------------------------------------
-        # Subscribers — own sensors
+        # Subscribers — own sensors (absolute paths)
         # ----------------------------------------------------------------
         self.create_subscription(
             Odometry, f'{ns}/odom',
@@ -211,6 +211,7 @@ class BoidNode(Node):
         self.get_logger().info(
             f'BoidNode started — robot_id={self.robot_id}, '
             f'num_robots={self.num_robots}, '
+            f'spawn_offset=({self.spawn_x:.1f}, {self.spawn_y:.1f}), '
             f'waypoints={self.waypoints}')
 
     # ====================================================================
@@ -231,6 +232,10 @@ class BoidNode(Node):
         self.declare_parameter('obstacle_threshold', 0.6)
         self.declare_parameter('max_linear_vel',     0.20)
         self.declare_parameter('max_angular_vel',    1.5)
+        # Spawn position offset: Gazebo's odom starts at (0,0) per robot.
+        # We add these offsets to convert odom-frame pose to world-frame pose.
+        self.declare_parameter('spawn_x', 0.0)
+        self.declare_parameter('spawn_y', 0.0)
         # Waypoints stored as a flat list: [x0, y0, x1, y1, ...]
         self.declare_parameter('waypoints', [12.0, 1.0, 12.0, 7.0, 12.0, 13.0])
 
@@ -248,6 +253,8 @@ class BoidNode(Node):
         self.obs_thresh   = float(self.get_parameter('obstacle_threshold').value)
         self.max_lin      = float(self.get_parameter('max_linear_vel').value)
         self.max_ang      = float(self.get_parameter('max_angular_vel').value)
+        self.spawn_x      = float(self.get_parameter('spawn_x').value)
+        self.spawn_y      = float(self.get_parameter('spawn_y').value)
 
         # Parse flat waypoint list into list of (x, y) tuples
         flat = list(self.get_parameter('waypoints').value)
@@ -264,11 +271,21 @@ class BoidNode(Node):
     # ====================================================================
 
     def _odom_callback(self, msg: Odometry) -> None:
-        """Extract pose and velocity from /odom."""
+        """Extract pose and velocity from /odom.
+
+        CRITICAL: Gazebo's diff_drive odom is in the robot's local frame
+        starting at (0, 0). We add (spawn_x, spawn_y) to convert to
+        world-frame coordinates so that inter-robot distance calculations
+        are correct.
+        """
         pos = msg.pose.pose.position
         ori = msg.pose.pose.orientation
         theta = yaw_from_quaternion(ori)
-        self.my_pose = (pos.x, pos.y, theta)
+
+        # Convert odom-local → world-frame by adding spawn offset
+        world_x = pos.x + self.spawn_x
+        world_y = pos.y + self.spawn_y
+        self.my_pose = (world_x, world_y, theta)
 
         # World-frame velocity (rotate body-frame twist by yaw)
         vx_body = msg.twist.twist.linear.x
@@ -280,8 +297,8 @@ class BoidNode(Node):
             vx_body * sin_t + vy_body * cos_t,
         )
 
-        # Share own state immediately after odom update
-        self._publish_own_state(pos.x, pos.y, theta, ori)
+        # Share world-frame state immediately after odom update
+        self._publish_own_state(world_x, world_y, theta, ori)
 
     def _scan_callback(self, msg: LaserScan) -> None:
         """Cache the latest laser scan."""
@@ -404,7 +421,7 @@ class BoidNode(Node):
                 continue
 
             dist = math.hypot(np.x - my_x, np.y - my_y)
-            if dist < 1e-3 or dist > self.neighbour_r:
+            if dist > self.neighbour_r:
                 continue
 
             nv = self.neighbour_vels.get(rid)

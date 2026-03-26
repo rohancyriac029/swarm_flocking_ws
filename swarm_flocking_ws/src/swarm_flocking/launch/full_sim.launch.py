@@ -193,12 +193,10 @@ def _spawn_all(context, *args, **kwargs):
                         {
                             'robot_id': i,
                             'num_robots': num_robots,
+                            'spawn_x': x,
+                            'spawn_y': y,
                             'use_sim_time': use_sim_time == 'true',
                         },
-                    ],
-                    remappings=[
-                        ('odom', f'/{ns}/odom'),
-                        ('scan', f'/{ns}/scan'),
                     ],
                     output='screen',
                 ),
