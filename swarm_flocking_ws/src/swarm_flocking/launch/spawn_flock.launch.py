@@ -76,38 +76,55 @@ def _do_spawn(context, *args, **kwargs):
         y = start_y + row * spacing
         ns = f'robot_{i}'
 
-        # robot_state_publisher
-        rsp = Node(
-            package='robot_state_publisher',
-            executable='robot_state_publisher',
-            name='robot_state_publisher',
-            namespace=ns,
-            parameters=[{
-                'robot_description': robot_description,
-                'use_sim_time': use_sim_time == 'true',
-                'frame_prefix': f'{ns}/',
-            }],
-            output='screen',
-        )
+        # Timing: Gazebo (already running) still needs a moment to serve
+        # /spawn_entity. Stagger each robot to avoid simultaneous spawn calls.
+        # Tune GAZEBO_READY_DELAY down to 3s if Gazebo was already running.
+        GAZEBO_READY_DELAY = 3.0
+        spawn_time = GAZEBO_READY_DELAY + i * 1.5
+        boid_time  = spawn_time + 5.0
 
-        # Gazebo entity spawn
-        spawn = Node(
-            package='gazebo_ros',
-            executable='spawn_entity.py',
-            arguments=[
-                '-entity', ns,
-                '-topic', f'/{ns}/robot_description',
-                '-x', str(x),
-                '-y', str(y),
-                '-z', '0.01',
-                '-robot_namespace', f'/{ns}',
+        # robot_state_publisher — start before spawn so topic is ready
+        rsp_action = TimerAction(
+            period=max(0.5, float(GAZEBO_READY_DELAY - 1.5)),
+            actions=[
+                Node(
+                    package='robot_state_publisher',
+                    executable='robot_state_publisher',
+                    name='robot_state_publisher',
+                    namespace=ns,
+                    parameters=[{
+                        'robot_description': robot_description,
+                        'use_sim_time': use_sim_time == 'true',
+                        'frame_prefix': f'{ns}/',
+                    }],
+                    output='screen',
+                ),
             ],
-            output='screen',
         )
 
-        # boid_node (delayed by robot index to avoid race conditions)
-        boid = TimerAction(
-            period=float(4 + i * 0.5),
+        # Spawn: fires after /spawn_entity is available
+        spawn_action = TimerAction(
+            period=float(spawn_time),
+            actions=[
+                Node(
+                    package='gazebo_ros',
+                    executable='spawn_entity.py',
+                    arguments=[
+                        '-entity', ns,
+                        '-topic', f'/{ns}/robot_description',
+                        '-x', str(x),
+                        '-y', str(y),
+                        '-z', '0.01',
+                        '-robot_namespace', f'/{ns}',
+                    ],
+                    output='screen',
+                ),
+            ],
+        )
+
+        # boid_node — fires after spawn completes
+        boid_action = TimerAction(
+            period=float(boid_time),
             actions=[
                 Node(
                     package='swarm_flocking',
@@ -127,7 +144,7 @@ def _do_spawn(context, *args, **kwargs):
             ],
         )
 
-        actions.extend([rsp, spawn, boid])
+        actions.extend([rsp_action, spawn_action, boid_action])
 
     # Single flock_monitor instance
     monitor = Node(

@@ -32,10 +32,9 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # Package share directories
+    # Package share directories (TB3 is looked up later, inside OpaqueFunction)
     pkg_flocking = get_package_share_directory('swarm_flocking')
     pkg_gazebo   = get_package_share_directory('swarm_flocking_gazebo')
-    pkg_tb3_desc = get_package_share_directory('turtlebot3_description')
 
     # Shared filepaths
     world_file   = os.path.join(pkg_gazebo, 'worlds', 'obstacle_course.world')
@@ -109,11 +108,22 @@ def _spawn_all(context, *args, **kwargs):
     from launch_ros.actions import Node as RosNode
     from launch.actions import TimerAction
 
+    # Resolve TB3 path here (inside OpaqueFunction) so a missing package
+    # produces a clear error at launch-time, not at file-parse time.
+    try:
+        pkg_tb3_desc = get_package_share_directory('turtlebot3_description')
+    except Exception:
+        raise RuntimeError(
+            "Could not find 'turtlebot3_description'. "
+            "Install it with:\n"
+            "  sudo apt install ros-humble-turtlebot3 ros-humble-turtlebot3-description\n"
+            "Then re-source your workspace."
+        )
+
     pkg_flocking = get_package_share_directory('swarm_flocking')
-    pkg_tb3_desc = get_package_share_directory('turtlebot3_description')
     params_file  = os.path.join(pkg_flocking, 'config', 'flocking_params.yaml')
 
-    num_robots = int(context.launch_configurations.get('num_robots', '6'))
+    num_robots   = int(context.launch_configurations.get('num_robots', '6'))
     use_sim_time = context.launch_configurations.get('use_sim_time', 'true')
     tb3_model    = context.launch_configurations.get('turtlebot3_model', 'burger')
 
@@ -132,38 +142,59 @@ def _spawn_all(context, *args, **kwargs):
         y = start_y + row * spacing
         ns = f'robot_{i}'
 
-        # robot_state_publisher per robot (unique namespace)
-        rsp = RosNode(
-            package='robot_state_publisher',
-            executable='robot_state_publisher',
-            name='robot_state_publisher',
-            namespace=ns,
-            parameters=[{
-                'robot_description': _read_urdf(urdf_path),
-                'use_sim_time': use_sim_time == 'true',
-                'frame_prefix': f'{ns}/',
-            }],
-            output='screen',
-        )
+        # --- Timing constants ---
+        # GAZEBO_READY_DELAY: seconds to wait for Gazebo's /spawn_entity
+        # service to become available. Gazebo + GazeboRosFactory
+        # typically takes 8-12s depending on hardware.
+        GAZEBO_READY_DELAY = 10.0
+        # Stagger each robot by 1.5s so spawn calls don't collide.
+        spawn_time = GAZEBO_READY_DELAY + i * 1.5
+        # Boid nodes start 5s after their robot is spawned.
+        boid_time  = spawn_time + 5.0
 
-        # Spawn entity in Gazebo
-        spawn = RosNode(
-            package='gazebo_ros',
-            executable='spawn_entity.py',
-            arguments=[
-                '-entity', ns,
-                '-topic', f'/{ns}/robot_description',
-                '-x', str(x),
-                '-y', str(y),
-                '-z', '0.01',
-                '-robot_namespace', f'/{ns}',
+        # robot_state_publisher: start early so /robot_description is
+        # ready when spawn_entity.py subscribes to it.
+        rsp_action = TimerAction(
+            period=float(GAZEBO_READY_DELAY - 2.0),   # 2s before spawn
+            actions=[
+                RosNode(
+                    package='robot_state_publisher',
+                    executable='robot_state_publisher',
+                    name='robot_state_publisher',
+                    namespace=ns,
+                    parameters=[{
+                        'robot_description': _read_urdf(urdf_path),
+                        'use_sim_time': use_sim_time == 'true',
+                        'frame_prefix': f'{ns}/',
+                    }],
+                    output='screen',
+                ),
             ],
-            output='screen',
         )
 
-        # boid_node for this robot (delayed to let Gazebo stabilise)
-        boid = TimerAction(
-            period=float(5 + i * 0.5),  # stagger launches
+        # Spawn entity: fires after Gazebo is ready
+        spawn_action = TimerAction(
+            period=float(spawn_time),
+            actions=[
+                RosNode(
+                    package='gazebo_ros',
+                    executable='spawn_entity.py',
+                    arguments=[
+                        '-entity', ns,
+                        '-topic', f'/{ns}/robot_description',
+                        '-x', str(x),
+                        '-y', str(y),
+                        '-z', '0.01',
+                        '-robot_namespace', f'/{ns}',
+                    ],
+                    output='screen',
+                ),
+            ],
+        )
+
+        # boid_node: fires after spawn is complete
+        boid_action = TimerAction(
+            period=float(boid_time),
             actions=[
                 RosNode(
                     package='swarm_flocking',
@@ -187,7 +218,23 @@ def _spawn_all(context, *args, **kwargs):
             ],
         )
 
-        actions.extend([rsp, spawn, boid])
+        actions.extend([rsp_action, spawn_action, boid_action])
+
+    # Flock monitor (one instance for the whole swarm)
+    monitor = RosNode(
+        package='swarm_flocking',
+        executable='flock_monitor_node',
+        name='flock_monitor',
+        parameters=[
+            params_file,
+            {
+                'num_robots': num_robots,
+                'use_sim_time': use_sim_time == 'true',
+            },
+        ],
+        output='screen',
+    )
+    actions.append(monitor)
 
     return actions
 
