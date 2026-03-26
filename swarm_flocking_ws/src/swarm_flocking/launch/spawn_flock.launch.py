@@ -55,15 +55,29 @@ def _do_spawn(context, *args, **kwargs):
     urdf_path = os.path.join(
         pkg_tb3_desc, 'urdf', f'turtlebot3_{tb3_model}.urdf')
 
-    # Read URDF once
+    # Process URDF via xacro to include Gazebo plugins (diff_drive, lidar)
+    import subprocess
+    xacro_path = urdf_path
+    if not os.path.exists(xacro_path):
+        xacro_path = urdf_path + '.xacro'
+    if not os.path.exists(xacro_path):
+        xacro_path = urdf_path.replace('.urdf', '.urdf.xacro')
+
     try:
-        with open(urdf_path, 'r') as f:
-            robot_description = f.read()
-    except FileNotFoundError:
-        robot_description = (
-            '<?xml version="1.0"?>'
-            '<robot name="turtlebot3_burger"><link name="base_link"/></robot>'
+        result = subprocess.run(
+            ['xacro', xacro_path],
+            capture_output=True, text=True, check=True,
         )
+        robot_description = result.stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            with open(urdf_path, 'r') as f:
+                robot_description = f.read()
+        except FileNotFoundError:
+            robot_description = (
+                '<?xml version="1.0"?>'
+                '<robot name="turtlebot3_burger"><link name="base_link"/></robot>'
+            )
 
     # Grid layout: 3 columns, starting at (2.0, 4.5)
     start_x, start_y, spacing = 2.0, 4.5, 0.7

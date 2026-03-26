@@ -225,15 +225,38 @@ def _spawn_all(context, *args, **kwargs):
 
 
 def _read_urdf(urdf_path: str) -> str:
-    """Read URDF file content as string (required by robot_state_publisher)."""
+    """Process URDF via xacro to expand macros and include Gazebo plugins.
+
+    TurtleBot3's URDF uses xacro includes for Gazebo plugins (diff_drive,
+    lidar, IMU).  Reading the raw file skips these, leaving the spawned
+    robot with NO ROS topics (no odom, no scan, no cmd_vel subscriber).
+    """
+    import subprocess
+
+    # Try the .xacro variant first (TurtleBot3 convention)
+    xacro_path = urdf_path
+    if not os.path.exists(xacro_path):
+        # Try with .xacro extension
+        xacro_path = urdf_path + '.xacro'
+    if not os.path.exists(xacro_path):
+        # Try replacing .urdf with .urdf.xacro
+        xacro_path = urdf_path.replace('.urdf', '.urdf.xacro')
+
     try:
-        with open(urdf_path, 'r') as f:
-            return f.read()
-    except FileNotFoundError:
-        # Fallback: return a minimal valid URDF so the node doesn't crash
-        return (
-            '<?xml version="1.0"?>'
-            '<robot name="turtlebot3_burger">'
-            '<link name="base_link"/>'
-            '</robot>'
+        result = subprocess.run(
+            ['xacro', xacro_path],
+            capture_output=True, text=True, check=True,
         )
+        return result.stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # Fallback: try reading the raw file
+        try:
+            with open(urdf_path, 'r') as f:
+                return f.read()
+        except FileNotFoundError:
+            return (
+                '<?xml version="1.0"?>'
+                '<robot name="turtlebot3_burger">'
+                '<link name="base_link"/>'
+                '</robot>'
+            )
