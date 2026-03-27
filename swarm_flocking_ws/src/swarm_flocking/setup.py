@@ -30,6 +30,7 @@ setup(
         'console_scripts': [
             'boid_node = swarm_flocking.boid_node:main',
             'flock_monitor_node = swarm_flocking.flock_monitor_node:main',
+            'physics_node = swarm_flocking.physics_node:main',
         ],
     },
 )

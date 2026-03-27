@@ -232,6 +232,20 @@ class BoidNode(Node):
         self.declare_parameter('obstacle_threshold', 0.6)
         self.declare_parameter('max_linear_vel',     0.20)
         self.declare_parameter('max_angular_vel',    1.5)
+        
+        # Adaptive scaling parameters
+        self.declare_parameter('k_sep',              0.5)
+        self.declare_parameter('min_sep_w',          1.0)
+        self.declare_parameter('max_sep_w',          3.0)
+        self.declare_parameter('alpha_coh',          0.2)
+        self.declare_parameter('min_coh_w',          0.5)
+        self.declare_parameter('max_coh_w',          2.0)
+        self.declare_parameter('ideal_separation',   1.0)
+        self.declare_parameter('threshold_spread',   1.5)
+        self.declare_parameter('min_obs_w',          1.0)
+        self.declare_parameter('max_obs_w',          5.0)
+        self.declare_parameter('laser_epsilon',      0.01)
+
         # Spawn position offset: Gazebo's odom starts at (0,0) per robot.
         # We add these offsets to convert odom-frame pose to world-frame pose.
         self.declare_parameter('spawn_x', 0.0)
@@ -255,6 +269,19 @@ class BoidNode(Node):
         self.max_ang      = float(self.get_parameter('max_angular_vel').value)
         self.spawn_x      = float(self.get_parameter('spawn_x').value)
         self.spawn_y      = float(self.get_parameter('spawn_y').value)
+
+        # Adaptive scaling parameters
+        self.k_sep         = float(self.get_parameter('k_sep').value)
+        self.min_sep_w     = float(self.get_parameter('min_sep_w').value)
+        self.max_sep_w     = float(self.get_parameter('max_sep_w').value)
+        self.alpha_coh     = float(self.get_parameter('alpha_coh').value)
+        self.min_coh_w     = float(self.get_parameter('min_coh_w').value)
+        self.max_coh_w     = float(self.get_parameter('max_coh_w').value)
+        self.ideal_sep     = float(self.get_parameter('ideal_separation').value)
+        self.thresh_spread = float(self.get_parameter('threshold_spread').value)
+        self.min_obs_w     = float(self.get_parameter('min_obs_w').value)
+        self.max_obs_w     = float(self.get_parameter('max_obs_w').value)
+        self.laser_eps     = float(self.get_parameter('laser_epsilon').value)
 
         # Parse flat waypoint list into list of (x, y) tuples
         flat = list(self.get_parameter('waypoints').value)
@@ -368,17 +395,48 @@ class BoidNode(Node):
             self.latest_scan, my_theta, self.obs_thresh)
         f_mig = self._get_migration_force(my_x, my_y)
 
-        # Step 3: weighted sum
-        fx = (self.w_sep * f_sep[0] +
+        # ----------------------------------------------------------------
+        # Step 3: Adaptive Weight Scaling
+        # ----------------------------------------------------------------
+        eff_w_sep = self.w_sep
+        eff_w_coh = self.w_coh
+        eff_w_obs = self.w_obs
+
+        if neighbours:
+            # 1. Crowding Response (Bounded Separation Scaling)
+            avg_neighbor_dist = sum(n[5] for n in neighbours) / len(neighbours)
+            crowd_factor = max(0.0, 1.0 - (avg_neighbor_dist / self.ideal_sep))
+            eff_w_sep = clamp(self.w_sep + self.k_sep * crowd_factor, self.min_sep_w, self.max_sep_w)
+
+            # 2. Fragmentation Response (Multiplicative Cohesion Scaling)
+            cx = sum(n[1] for n in neighbours) / len(neighbours)
+            cy = sum(n[2] for n in neighbours) / len(neighbours)
+            local_coh = math.hypot(my_x - cx, my_y - cy)
+            spread_factor = max(0.0, local_coh - self.thresh_spread)
+            eff_w_coh = clamp(self.w_coh * (1.0 + self.alpha_coh * spread_factor), self.min_coh_w, self.max_coh_w)
+
+        # 3. Threat-Proximity Response (Safe Obstacle Scaling)
+        if self.latest_scan and getattr(self.latest_scan, 'ranges', None):
+            valid_ranges = [r for r in self.latest_scan.ranges if math.isfinite(r) and r > 0.0]
+            if valid_ranges:
+                min_laser_dist = min(valid_ranges)
+                safe_dist = max(min_laser_dist, self.laser_eps)
+                scale = min(self.max_obs_w / self.w_obs if self.w_obs > 0 else 1.0, self.obs_thresh / safe_dist)
+                eff_w_obs = clamp(self.w_obs * scale, self.min_obs_w, self.max_obs_w)
+
+        # ----------------------------------------------------------------
+        # Step 4: Weighted sum
+        # ----------------------------------------------------------------
+        fx = (eff_w_sep * f_sep[0] +
               self.w_ali * f_ali[0] +
-              self.w_coh * f_coh[0] +
-              self.w_obs * f_obs[0] +
+              eff_w_coh * f_coh[0] +
+              eff_w_obs * f_obs[0] +
               self.w_mig * f_mig[0])
 
-        fy = (self.w_sep * f_sep[1] +
+        fy = (eff_w_sep * f_sep[1] +
               self.w_ali * f_ali[1] +
-              self.w_coh * f_coh[1] +
-              self.w_obs * f_obs[1] +
+              eff_w_coh * f_coh[1] +
+              eff_w_obs * f_obs[1] +
               self.w_mig * f_mig[1])
 
         # Step 4: convert resultant force → (linear, angular) commands

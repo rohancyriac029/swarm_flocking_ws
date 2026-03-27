@@ -22,6 +22,9 @@ All geometry uses frame_id='map'.
 
 import math
 import time
+import csv
+import os
+import sys
 from collections import deque
 from typing import Dict, List, Optional, Tuple
 
@@ -37,7 +40,7 @@ from rclpy.qos import (
 from geometry_msgs.msg import PointStamped, Point
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header
-from geometry_msgs.msg import PoseStamped, TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped, Twist
 
 from swarm_interfaces.msg import FlockState
 from swarm_flocking.utils.reynolds import yaw_from_quaternion
@@ -93,9 +96,22 @@ class FlockMonitorNode(Node):
         self.declare_parameter('num_robots', 6)
         self.declare_parameter('neighbor_radius', 3.0)
         self.declare_parameter('separation_radius', 0.8)
+        self.declare_parameter('waypoints', [12.0, 1.0, 12.0, 7.0, 12.0, 13.0])
 
         self.num_robots    = int(self.get_parameter('num_robots').value)
         self.neighbour_r   = float(self.get_parameter('neighbor_radius').value)
+
+        flat = list(self.get_parameter('waypoints').value)
+        if len(flat) % 2 != 0:
+            flat = flat[:-1]
+        self.waypoints = [(flat[k], flat[k+1]) for k in range(0, len(flat), 2)]
+        self.final_waypoint = self.waypoints[-1] if self.waypoints else None
+
+        # ------- Goal/Metrics tracking state -------
+        self.start_time = None
+        self.total_steps = 0
+        self.sum_cohesion = 0.0
+        self.experiment_completed = False
 
         # ------- Per-robot state -------
         self.robot_states: Dict[int, RobotState] = {
@@ -131,6 +147,11 @@ class FlockMonitorNode(Node):
         self.state_pub = self.create_publisher(
             FlockState, '/flock/state', 10)
 
+        # Command publishers for safe termination
+        self.cmd_pubs = {}
+        for i in range(self.num_robots):
+            self.cmd_pubs[i] = self.create_publisher(Twist, f'/robot_{i}/cmd_vel', STATE_QOS)
+
         # ------- Timer at 2 Hz -------
         self.timer = self.create_timer(0.5, self._compute_and_publish)
 
@@ -159,7 +180,13 @@ class FlockMonitorNode(Node):
     # ====================================================================
 
     def _compute_and_publish(self) -> None:
+        if self.experiment_completed:
+            return
+
         now = time.monotonic()
+        if self.start_time is None:
+            self.start_time = now
+
         stamp = self.get_clock().now().to_msg()
 
         # Filter to robots with fresh pose data
@@ -186,6 +213,9 @@ class FlockMonitorNode(Node):
                        self.robot_states[rid].y - cy)
             for rid in active_ids
         ) / num_active
+
+        self.sum_cohesion += cohesion_radius
+        self.total_steps += 1
 
         # ------------------------------------------------------------------
         # 3. Average speed
@@ -223,6 +253,10 @@ class FlockMonitorNode(Node):
         # ------------------------------------------------------------------
         # 6. Publish FlockState
         # ------------------------------------------------------------------
+        elapsed_time = now - self.start_time
+        collision_rate = self._cumulative_collisions / elapsed_time if elapsed_time > 0.0 else 0.0
+        mean_cohesion = self.sum_cohesion / self.total_steps if self.total_steps > 0 else 0.0
+
         state_msg = FlockState()
         state_msg.header.stamp = stamp
         state_msg.header.frame_id = 'map'
@@ -235,6 +269,9 @@ class FlockMonitorNode(Node):
         state_msg.collision_count    = self._cumulative_collisions
         state_msg.is_split           = is_split
         state_msg.num_subgroups      = num_subgroups
+        state_msg.total_time         = float(elapsed_time)
+        state_msg.collision_rate     = float(collision_rate)
+        state_msg.mean_cohesion      = float(mean_cohesion)
         self.state_pub.publish(state_msg)
 
         # ------------------------------------------------------------------
@@ -259,6 +296,48 @@ class FlockMonitorNode(Node):
         # ------------------------------------------------------------------
         links_array = self._build_link_markers(active_ids, stamp)
         self.links_pub.publish(links_array)
+
+        # ------------------------------------------------------------------
+        # 10. Goal Completion Detection
+        # ------------------------------------------------------------------
+        if self.final_waypoint is not None and num_active == self.num_robots:
+            gx, gy = self.final_waypoint
+            # Epsilon arrival distance = 1.2m
+            if all(math.hypot(self.robot_states[rid].x - gx, self.robot_states[rid].y - gy) < 1.2 for rid in active_ids):
+                self.get_logger().info(f"EXPERIMENT COMPLETE! All robots strictly reached the final waypoint in {elapsed_time:.2f}s.")
+                self.experiment_completed = True
+                
+                stop_msg = Twist()
+                for pub in self.cmd_pubs.values():
+                    pub.publish(stop_msg)
+                
+                self._log_results_to_csv(elapsed_time, collision_rate, mean_cohesion)
+                
+                # Graceful flush before killing standard execution
+                self.create_timer(1.0, self._shutdown_callback)
+
+    def _log_results_to_csv(self, elapsed_time, collision_rate, mean_cohesion):
+        filename = 'experiment_results.csv'
+        file_exists = os.path.isfile(filename)
+        try:
+            with open(filename, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                if not file_exists:
+                    writer.writerow(['num_robots', 'completion_time', 'collision_rate', 'mean_cohesion', 'total_collisions'])
+                writer.writerow([
+                    self.num_robots,
+                    round(elapsed_time, 3),
+                    round(collision_rate, 4),
+                    round(mean_cohesion, 4),
+                    self._cumulative_collisions
+                ])
+            self.get_logger().info(f"Appended configuration and metrics to {filename}.")
+        except Exception as e:
+            self.get_logger().error(f"Failed to write CSV: {e}")
+
+    def _shutdown_callback(self):
+        self.get_logger().info("Flushing complete. Triggering safe system tear-down.")
+        sys.exit(0)
 
     # ====================================================================
     # Split detection via BFS

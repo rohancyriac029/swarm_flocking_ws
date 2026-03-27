@@ -22,3 +22,12 @@ bool is_split
 
 # Number of detected sub-groups when is_split is true
 int32 num_subgroups
+
+# Total elapsed time since the monitor started receiving data (seconds)
+float32 total_time
+
+# Rolling average of collisions per second
+float32 collision_rate
+
+# Rolling average of the cohesion radius (meters)
+float32 mean_cohesion
