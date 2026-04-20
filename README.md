@@ -146,7 +146,9 @@ source ~/.bashrc
 ## Building
 
 ```bash
-cd ~/swarm_flocking_ws/swarm_flocking_ws
+# Set this to your actual clone location
+WS=~/swarm_flocking_ws/swarm_flocking_ws
+cd $WS
 
 # Install any missing dependencies
 rosdep install --from-paths src --ignore-src -r -y
@@ -167,11 +169,12 @@ source install/setup.bash
 
 ```bash
 # Make sure environment is set
+WS=~/swarm_flocking_ws/swarm_flocking_ws   # update if your clone lives elsewhere
 export TURTLEBOT3_MODEL=burger
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_DOMAIN_ID=0
 source /opt/ros/humble/setup.bash
-source ~/swarm_flocking_ws/swarm_flocking_ws/install/setup.bash
+source $WS/install/setup.bash
 
 # Launch!
 ros2 launch swarm_flocking full_sim.launch.py num_robots:=6
@@ -204,10 +207,11 @@ ros2 launch swarm_flocking full_sim.launch.py num_robots:=10
 Open a **second terminal** for monitoring. Always set the same environment:
 
 ```bash
+WS=~/swarm_flocking_ws/swarm_flocking_ws   # must match Terminal 1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_DOMAIN_ID=0
 source /opt/ros/humble/setup.bash
-source ~/swarm_flocking_ws/swarm_flocking_ws/install/setup.bash
+source $WS/install/setup.bash
 ```
 
 ### Watch Flock Metrics
@@ -307,6 +311,27 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ### Topics not visible between terminals
 
 Both terminals must use identical `RMW_IMPLEMENTATION` and `ROS_DOMAIN_ID` values. DDS nodes using different implementations cannot communicate.
+
+### "The message type 'swarm_interfaces/msg/FlockState' is invalid"
+
+This means your current terminal can see the topic name but does not have the custom interface package in its environment.
+
+```bash
+# In the terminal where echo fails
+ros2 pkg list | grep swarm_interfaces
+ros2 interface show swarm_interfaces/msg/FlockState
+python3 -c "from swarm_interfaces.msg import FlockState; print('OK')"
+```
+
+If any command fails, rebuild and source the same workspace in every terminal:
+
+```bash
+WS=~/swarm_flocking_ws/swarm_flocking_ws   # update to your real path
+cd $WS
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-up-to swarm_flocking
+source $WS/install/setup.bash
+```
 
 ---
 

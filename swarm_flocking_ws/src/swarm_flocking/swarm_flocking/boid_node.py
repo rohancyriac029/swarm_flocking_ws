@@ -232,6 +232,11 @@ class BoidNode(Node):
         self.declare_parameter('obstacle_threshold', 0.6)
         self.declare_parameter('max_linear_vel',     0.20)
         self.declare_parameter('max_angular_vel',    1.5)
+        # Odom frame mode:
+        #   auto  -> infer from first odom sample
+        #   local -> odom starts near (0,0), apply spawn offset
+        #   world -> odom already in world frame, do not apply spawn offset
+        self.declare_parameter('odom_pose_frame_mode', 'auto')
         
         # Adaptive scaling parameters
         self.declare_parameter('k_sep',              0.5)
@@ -252,6 +257,9 @@ class BoidNode(Node):
         self.declare_parameter('spawn_y', 0.0)
         # Waypoints stored as a flat list: [x0, y0, x1, y1, ...]
         self.declare_parameter('waypoints', [12.0, 1.0, 12.0, 7.0, 12.0, 13.0])
+        # Per-lane waypoint Y spreading to reduce crowding at narrow passages.
+        # Lane index is derived from robot_id modulo 3.
+        self.declare_parameter('waypoint_lane_spread', 0.0)
 
     def _read_params(self) -> None:
         """Read all declared parameters into instance attributes."""
@@ -269,6 +277,21 @@ class BoidNode(Node):
         self.max_ang      = float(self.get_parameter('max_angular_vel').value)
         self.spawn_x      = float(self.get_parameter('spawn_x').value)
         self.spawn_y      = float(self.get_parameter('spawn_y').value)
+        self.odom_mode    = str(
+            self.get_parameter('odom_pose_frame_mode').value).strip().lower()
+        self.wp_lane_spread = float(
+            self.get_parameter('waypoint_lane_spread').value)
+
+        if self.odom_mode not in ('auto', 'local', 'world'):
+            self.get_logger().warn(
+                f"Invalid odom_pose_frame_mode='{self.odom_mode}', using 'auto'.")
+            self.odom_mode = 'auto'
+
+        # Runtime-resolved odom frame behavior.
+        # local: world_xy = odom_xy + spawn_xy
+        # world: world_xy = odom_xy
+        self._odom_mode_resolved = self.odom_mode != 'auto'
+        self._apply_spawn_offset = self.odom_mode == 'local'
 
         # Adaptive scaling parameters
         self.k_sep         = float(self.get_parameter('k_sep').value)
@@ -309,9 +332,29 @@ class BoidNode(Node):
         ori = msg.pose.pose.orientation
         theta = yaw_from_quaternion(ori)
 
-        # Convert odom-local → world-frame by adding spawn offset
-        world_x = pos.x + self.spawn_x
-        world_y = pos.y + self.spawn_y
+        # Auto-detect odom frame mode once, then keep stable.
+        if not self._odom_mode_resolved:
+            # If the very first odom reading is already far from origin,
+            # the plugin is likely publishing world-frame pose.
+            if abs(pos.x) > 0.35 or abs(pos.y) > 0.35:
+                self._apply_spawn_offset = False
+                detected_mode = 'world'
+            else:
+                self._apply_spawn_offset = True
+                detected_mode = 'local'
+            self._odom_mode_resolved = True
+            self.get_logger().info(
+                f'robot_{self.robot_id} odom mode auto-detected as '
+                f"{detected_mode} (raw odom=({pos.x:.2f}, {pos.y:.2f})).")
+
+        if self._apply_spawn_offset:
+            # Convert odom-local -> world-frame by adding spawn offset.
+            world_x = pos.x + self.spawn_x
+            world_y = pos.y + self.spawn_y
+        else:
+            # Odom already reports world-frame pose.
+            world_x = pos.x
+            world_y = pos.y
         self.my_pose = (world_x, world_y, theta)
 
         # World-frame velocity (rotate body-frame twist by yaw)
@@ -504,6 +547,12 @@ class BoidNode(Node):
             # All waypoints reached — no migration force
             return (0.0, 0.0)
         gx, gy = self.waypoints[self.current_wp]
+
+        # Keep final goal shared, but spread intermediate waypoint lanes.
+        if self.current_wp < (len(self.waypoints) - 1) and self.wp_lane_spread > 0.0:
+            lane_idx = (self.robot_id % 3) - 1  # {-1, 0, +1}
+            gy += lane_idx * self.wp_lane_spread
+
         return compute_migration(my_x, my_y, gx, gy)
 
     def _advance_waypoint(self, my_x: float, my_y: float) -> None:

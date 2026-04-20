@@ -738,14 +738,19 @@ Comprehensive unit tests covering all Reynolds math functions:
 
 ```bash
 # Terminal 1 — Launch everything
+WS=~/swarm_flocking_ws/swarm_flocking_ws   # update if your clone lives elsewhere
 export TURTLEBOT3_MODEL=burger
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_DOMAIN_ID=0
 source /opt/ros/humble/setup.bash
-source ~/swarm_flocking_ws/swarm_flocking_ws/install/setup.bash
+source $WS/install/setup.bash
 ros2 launch swarm_flocking full_sim.launch.py num_robots:=6
 
 # Terminal 2 — Monitor flock state
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DOMAIN_ID=0
+source /opt/ros/humble/setup.bash
+source $WS/install/setup.bash
 ros2 topic echo /flock/state
 
 # Terminal 3 — Live-tune a weight
