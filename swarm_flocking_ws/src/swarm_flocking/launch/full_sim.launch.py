@@ -4,7 +4,7 @@
 full_sim.launch.py — Master launch file.
 
 Starts:
-    1. Gazebo with open_field.world by default (no internal obstacles)
+    1. Gazebo with coordination_empty.world by default (no walls/maze obstacles)
   2. N TurtleBot3 robots (robot_state_publisher + Gazebo spawn)
   3. N boid_node instances (one per robot)
   4. flock_monitor_node (singleton)
@@ -15,7 +15,7 @@ Usage:
 
 World override:
         ros2 launch swarm_flocking full_sim.launch.py \
-            world:=$(ros2 pkg prefix swarm_flocking_gazebo)/share/swarm_flocking_gazebo/worlds/open_field.world
+    world:=$(ros2 pkg prefix swarm_flocking_gazebo)/share/swarm_flocking_gazebo/worlds/coordination_empty.world
 """
 
 import os
@@ -41,7 +41,7 @@ def generate_launch_description():
     pkg_gazebo   = get_package_share_directory('swarm_flocking_gazebo')
 
     # Shared filepaths
-    default_world_file = os.path.join(pkg_gazebo, 'worlds', 'open_field.world')
+    default_world_file = os.path.join(pkg_gazebo, 'worlds', 'coordination_empty.world')
     params_file  = os.path.join(pkg_flocking, 'config', 'flocking_params.yaml')
     rviz_cfg     = os.path.join(pkg_flocking, 'config', 'rviz_config.rviz')
 
@@ -61,7 +61,7 @@ def generate_launch_description():
     world_arg = DeclareLaunchArgument(
         'world',
         default_value=default_world_file,
-        description='Full path to Gazebo world file (default: open_field.world)')
+        description='Full path to Gazebo world file (default: coordination_empty.world)')
 
     # Gazebo environment variables
     gazebo_models_path = SetEnvironmentVariable(
