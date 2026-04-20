@@ -4,7 +4,7 @@
 full_sim.launch.py — Master launch file.
 
 Starts:
-    1. Gazebo with open_field.world (no internal obstacles)
+    1. Gazebo with open_field.world by default (no internal obstacles)
   2. N TurtleBot3 robots (robot_state_publisher + Gazebo spawn)
   3. N boid_node instances (one per robot)
   4. flock_monitor_node (singleton)
@@ -12,6 +12,10 @@ Starts:
 
 Usage:
     ros2 launch swarm_flocking full_sim.launch.py num_robots:=6
+
+World override:
+        ros2 launch swarm_flocking full_sim.launch.py \
+            world:=$(ros2 pkg prefix swarm_flocking_gazebo)/share/swarm_flocking_gazebo/worlds/open_field.world
 """
 
 import os
@@ -37,7 +41,7 @@ def generate_launch_description():
     pkg_gazebo   = get_package_share_directory('swarm_flocking_gazebo')
 
     # Shared filepaths
-    world_file   = os.path.join(pkg_gazebo, 'worlds', 'open_field.world')
+    default_world_file = os.path.join(pkg_gazebo, 'worlds', 'open_field.world')
     params_file  = os.path.join(pkg_flocking, 'config', 'flocking_params.yaml')
     rviz_cfg     = os.path.join(pkg_flocking, 'config', 'rviz_config.rviz')
 
@@ -54,6 +58,11 @@ def generate_launch_description():
         'turtlebot3_model', default_value='burger',
         description='TurtleBot3 model type')
 
+    world_arg = DeclareLaunchArgument(
+        'world',
+        default_value=default_world_file,
+        description='Full path to Gazebo world file (default: open_field.world)')
+
     # Gazebo environment variables
     gazebo_models_path = SetEnvironmentVariable(
         'GAZEBO_MODEL_PATH',
@@ -64,7 +73,7 @@ def generate_launch_description():
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_gazebo, 'launch', 'gazebo_world.launch.py')),
-        launch_arguments={'world': world_file}.items())
+        launch_arguments={'world': LaunchConfiguration('world')}.items())
 
     # Spawn robots + boid nodes + flock_monitor via OpaqueFunction
     spawn_and_boids = OpaqueFunction(function=_spawn_all)
@@ -84,6 +93,7 @@ def generate_launch_description():
         num_robots_arg,
         use_sim_time_arg,
         tb3_model_arg,
+        world_arg,
         gazebo_launch,
         spawn_and_boids,
         rviz_node,

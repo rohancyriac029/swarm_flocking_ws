@@ -24,7 +24,7 @@ def generate_launch_description():
     pkg_gz_world   = get_package_share_directory('swarm_flocking_gazebo')
 
     default_world = os.path.join(
-        pkg_gz_world, 'worlds', 'obstacle_course.world')
+        pkg_gz_world, 'worlds', 'open_field.world')
 
     world_arg = DeclareLaunchArgument(
         'world',
