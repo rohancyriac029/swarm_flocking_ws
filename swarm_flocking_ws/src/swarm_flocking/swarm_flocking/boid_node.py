@@ -7,7 +7,8 @@ Responsibilities:
   • Subscribe to own /odom (nav_msgs/Odometry) and publish a pose_share /
     velocity_share so sibling robots can read our state.
   • Subscribe to all peer robots' pose_share and velocity_share topics.
-  • Compute the five Reynolds forces every 0.1 s (10 Hz).
+    • Compute flocking forces every 0.1 s (10 Hz).
+    • Optionally include obstacle avoidance (disabled by default for open-field runs).
   • Apply exponential low-pass smoothing to avoid jitter.
   • Publish cmd_vel respecting TurtleBot3 Burger velocity limits.
 
@@ -33,7 +34,7 @@ from rclpy.qos import (
     QoSDurabilityPolicy,
 )
 
-from geometry_msgs.msg import Twist, PoseStamped, TwistStamped, Point
+from geometry_msgs.msg import Twist, PoseStamped, TwistStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 
@@ -58,11 +59,11 @@ from swarm_flocking.utils.obstacle_avoidance import laser_to_repulsive_force
 STALE_TIMEOUT_S = 2.0
 
 # Low-pass filter coefficient α ∈ (0, 1].  Smaller = smoother, more lag.
-# 0.4 gives a good balance between responsiveness and smoothness at 10 Hz.
-LPF_ALPHA = 0.4
+# 0.6 is more responsive while still filtering jitter.
+LPF_ALPHA = 0.6
 
 # Waypoint arrival radius (meters)
-WAYPOINT_ARRIVAL_RADIUS = 1.2
+WAYPOINT_ARRIVAL_RADIUS = 0.8
 
 # QoS profile: best-effort for high-frequency sensor-like topics
 SENSOR_QOS = QoSProfile(
@@ -154,6 +155,7 @@ class BoidNode(Node):
 
         # Waypoint pointer
         self.current_wp: int = 0
+        self.goal_reached_logged: bool = False
 
         # Cumulative collision counter (for FlockState)
         self.collision_count: int = 0
@@ -179,9 +181,10 @@ class BoidNode(Node):
             Odometry, f'{ns}/odom',
             self._odom_callback, SENSOR_QOS)
 
-        self.create_subscription(
-            LaserScan, f'{ns}/scan',
-            self._scan_callback, SENSOR_QOS)
+        if self.enable_obstacle_avoidance:
+            self.create_subscription(
+                LaserScan, f'{ns}/scan',
+                self._scan_callback, SENSOR_QOS)
 
         # ----------------------------------------------------------------
         # Subscribers — neighbour state (one per peer)
@@ -227,6 +230,7 @@ class BoidNode(Node):
         self.declare_parameter('w_cohesion',         1.0)
         self.declare_parameter('w_obstacle',         2.5)
         self.declare_parameter('w_migration',        0.3)
+        self.declare_parameter('enable_obstacle_avoidance', False)
         self.declare_parameter('neighbor_radius',    3.0)
         self.declare_parameter('separation_radius',  0.8)
         self.declare_parameter('obstacle_threshold', 0.6)
@@ -238,19 +242,6 @@ class BoidNode(Node):
         #   world -> odom already in world frame, do not apply spawn offset
         self.declare_parameter('odom_pose_frame_mode', 'auto')
         
-        # Adaptive scaling parameters
-        self.declare_parameter('k_sep',              0.5)
-        self.declare_parameter('min_sep_w',          1.0)
-        self.declare_parameter('max_sep_w',          3.0)
-        self.declare_parameter('alpha_coh',          0.2)
-        self.declare_parameter('min_coh_w',          0.5)
-        self.declare_parameter('max_coh_w',          2.0)
-        self.declare_parameter('ideal_separation',   1.0)
-        self.declare_parameter('threshold_spread',   1.5)
-        self.declare_parameter('min_obs_w',          1.0)
-        self.declare_parameter('max_obs_w',          5.0)
-        self.declare_parameter('laser_epsilon',      0.01)
-
         # Spawn position offset: Gazebo's odom starts at (0,0) per robot.
         # We add these offsets to convert odom-frame pose to world-frame pose.
         self.declare_parameter('spawn_x', 0.0)
@@ -270,6 +261,8 @@ class BoidNode(Node):
         self.w_coh     = float(self.get_parameter('w_cohesion').value)
         self.w_obs     = float(self.get_parameter('w_obstacle').value)
         self.w_mig     = float(self.get_parameter('w_migration').value)
+        self.enable_obstacle_avoidance = bool(
+            self.get_parameter('enable_obstacle_avoidance').value)
         self.neighbour_r  = float(self.get_parameter('neighbor_radius').value)
         self.sep_r        = float(self.get_parameter('separation_radius').value)
         self.obs_thresh   = float(self.get_parameter('obstacle_threshold').value)
@@ -292,19 +285,6 @@ class BoidNode(Node):
         # world: world_xy = odom_xy
         self._odom_mode_resolved = self.odom_mode != 'auto'
         self._apply_spawn_offset = self.odom_mode == 'local'
-
-        # Adaptive scaling parameters
-        self.k_sep         = float(self.get_parameter('k_sep').value)
-        self.min_sep_w     = float(self.get_parameter('min_sep_w').value)
-        self.max_sep_w     = float(self.get_parameter('max_sep_w').value)
-        self.alpha_coh     = float(self.get_parameter('alpha_coh').value)
-        self.min_coh_w     = float(self.get_parameter('min_coh_w').value)
-        self.max_coh_w     = float(self.get_parameter('max_coh_w').value)
-        self.ideal_sep     = float(self.get_parameter('ideal_separation').value)
-        self.thresh_spread = float(self.get_parameter('threshold_spread').value)
-        self.min_obs_w     = float(self.get_parameter('min_obs_w').value)
-        self.max_obs_w     = float(self.get_parameter('max_obs_w').value)
-        self.laser_eps     = float(self.get_parameter('laser_epsilon').value)
 
         # Parse flat waypoint list into list of (x, y) tuples
         flat = list(self.get_parameter('waypoints').value)
@@ -424,6 +404,14 @@ class BoidNode(Node):
             # No odometry yet — hold still
             return
 
+        if self.current_wp >= len(self.waypoints):
+            if not self.goal_reached_logged:
+                self.get_logger().info(
+                    f'robot_{self.robot_id} reached final waypoint and is holding position.')
+                self.goal_reached_logged = True
+            self.cmd_pub.publish(Twist())
+            return
+
         my_x, my_y, my_theta = self.my_pose
         my_vx, my_vy = self.my_vel
 
@@ -434,55 +422,29 @@ class BoidNode(Node):
         f_sep = compute_separation(my_x, my_y, neighbours, self.sep_r)
         f_ali = compute_alignment(my_vx, my_vy, neighbours)
         f_coh = compute_cohesion(my_x, my_y, neighbours)
-        f_obs = laser_to_repulsive_force(
-            self.latest_scan, my_theta, self.obs_thresh)
+        if self.enable_obstacle_avoidance:
+            f_obs = laser_to_repulsive_force(
+                self.latest_scan, my_theta, self.obs_thresh)
+        else:
+            f_obs = (0.0, 0.0)
         f_mig = self._get_migration_force(my_x, my_y)
 
         # ----------------------------------------------------------------
-        # Step 3: Adaptive Weight Scaling
+        # Step 3: Weighted sum
         # ----------------------------------------------------------------
-        eff_w_sep = self.w_sep
-        eff_w_coh = self.w_coh
-        eff_w_obs = self.w_obs
-
-        if neighbours:
-            # 1. Crowding Response (Bounded Separation Scaling)
-            avg_neighbor_dist = sum(n[5] for n in neighbours) / len(neighbours)
-            crowd_factor = max(0.0, 1.0 - (avg_neighbor_dist / self.ideal_sep))
-            eff_w_sep = clamp(self.w_sep + self.k_sep * crowd_factor, self.min_sep_w, self.max_sep_w)
-
-            # 2. Fragmentation Response (Multiplicative Cohesion Scaling)
-            cx = sum(n[1] for n in neighbours) / len(neighbours)
-            cy = sum(n[2] for n in neighbours) / len(neighbours)
-            local_coh = math.hypot(my_x - cx, my_y - cy)
-            spread_factor = max(0.0, local_coh - self.thresh_spread)
-            eff_w_coh = clamp(self.w_coh * (1.0 + self.alpha_coh * spread_factor), self.min_coh_w, self.max_coh_w)
-
-        # 3. Threat-Proximity Response (Safe Obstacle Scaling)
-        if self.latest_scan and getattr(self.latest_scan, 'ranges', None):
-            valid_ranges = [r for r in self.latest_scan.ranges if math.isfinite(r) and r > 0.0]
-            if valid_ranges:
-                min_laser_dist = min(valid_ranges)
-                safe_dist = max(min_laser_dist, self.laser_eps)
-                scale = min(self.max_obs_w / self.w_obs if self.w_obs > 0 else 1.0, self.obs_thresh / safe_dist)
-                eff_w_obs = clamp(self.w_obs * scale, self.min_obs_w, self.max_obs_w)
-
-        # ----------------------------------------------------------------
-        # Step 4: Weighted sum
-        # ----------------------------------------------------------------
-        fx = (eff_w_sep * f_sep[0] +
+        fx = (self.w_sep * f_sep[0] +
               self.w_ali * f_ali[0] +
-              eff_w_coh * f_coh[0] +
-              eff_w_obs * f_obs[0] +
+              self.w_coh * f_coh[0] +
+              self.w_obs * f_obs[0] +
               self.w_mig * f_mig[0])
 
-        fy = (eff_w_sep * f_sep[1] +
+        fy = (self.w_sep * f_sep[1] +
               self.w_ali * f_ali[1] +
-              eff_w_coh * f_coh[1] +
-              eff_w_obs * f_obs[1] +
+              self.w_coh * f_coh[1] +
+              self.w_obs * f_obs[1] +
               self.w_mig * f_mig[1])
 
-        # Step 4: convert resultant force → (linear, angular) commands
+        # Step 4: convert resultant force -> (linear, angular) commands
         lin, ang = force_to_cmd_vel(fx, fy, my_theta, self.max_lin, self.max_ang)
 
         # Step 5: exponential low-pass filter to smooth jerky commands

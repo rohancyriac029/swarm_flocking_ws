@@ -4,7 +4,7 @@
 full_sim.launch.py — Master launch file.
 
 Starts:
-  1. Gazebo with obstacle_course.world
+    1. Gazebo with open_field.world (no internal obstacles)
   2. N TurtleBot3 robots (robot_state_publisher + Gazebo spawn)
   3. N boid_node instances (one per robot)
   4. flock_monitor_node (singleton)
@@ -37,7 +37,7 @@ def generate_launch_description():
     pkg_gazebo   = get_package_share_directory('swarm_flocking_gazebo')
 
     # Shared filepaths
-    world_file   = os.path.join(pkg_gazebo, 'worlds', 'obstacle_course.world')
+    world_file   = os.path.join(pkg_gazebo, 'worlds', 'open_field.world')
     params_file  = os.path.join(pkg_flocking, 'config', 'flocking_params.yaml')
     rviz_cfg     = os.path.join(pkg_flocking, 'config', 'rviz_config.rviz')
 
